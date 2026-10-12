@@ -5,6 +5,14 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platforms to package
+        type: choice
+        default: windows
+        options:
+          - windows
+          - all
 
 permissions:
   contents: write
@@ -26,15 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux-x86_64
-            os: ubuntu-22.04
-          - name: macos-aarch64
-            os: macos-latest
-          - name: macos-x86_64
-            os: macos-15-intel
-          - name: windows-x86_64
-            os: windows-latest
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.platform == 'windows' && '[{"name":"windows-x86_64","os":"windows-latest"}]' || '[{"name":"linux-x86_64","os":"ubuntu-22.04"},{"name":"macos-aarch64","os":"macos-latest"},{"name":"macos-x86_64","os":"macos-15-intel"},{"name":"windows-x86_64","os":"windows-latest"}]') }}
     defaults:
       run:
         shell: bash
@@ -177,7 +177,7 @@ jobs:
           name: ghost-job-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 14
 
   release-stage:
     needs: build-stage
