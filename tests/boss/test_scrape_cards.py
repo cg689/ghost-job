@@ -39,6 +39,7 @@ class FakeCards:
 class FakePage:
     def __init__(self, n: int) -> None:
         self.cards = FakeCards(n)
+        self.url = "https://www.zhipin.com/web/geek/job"
 
     def locator(self, _selector: str) -> FakeCards:
         return self.cards

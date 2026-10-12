@@ -19,6 +19,8 @@
 
 </div>
 
+> 本 fork 已修复点击「立即沟通」后跳到聊天页、随后出现 `Locator.get_attribute` 超时的问题。修复说明和源码运行方法见 [FIXES.md](FIXES.md)。
+
 ![工作台](assets/screenshots/workbench.png)
 
 ## 自动投递效果

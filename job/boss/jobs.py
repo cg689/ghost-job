@@ -253,6 +253,53 @@ class JobScraper:
         on_job: Callable[[Job], Awaitable[None]] | None,
     ) -> str:
         """投递一个城市的搜索结果，投递成功的追加进 ``jobs``；返回状态。"""
+        state = await self._open_list(page, url)
+        if state != "done":
+            return state
+        list_location = urlparse(page.url)[:3]
+
+        done: set[str] = set()
+        idle = 0
+        recoveries = 0
+        scrolls = 0
+        while scrolls < self.MAX_SCROLLS:
+            seen = len(done)
+            jobs.extend(await self._scrape_cards(page, done, on_job))
+            if self._stop.is_set():
+                return self._end_state()
+            if await self._needs_login(page):
+                return "need_login"
+            if (
+                urlparse(page.url)[:3] != list_location
+                or not await page.locator(self.CARD).count()
+            ):
+                # 沟通后可能直接进入聊天页；恢复后从头扫描，用职位 ID 跳过已处理项。
+                recoveries = 0 if len(done) > seen else recoveries + 1
+                if recoveries >= 2:
+                    await self._log(
+                        "职位列表反复跳转或消失，停止投递，请检查浏览器页面", "warn"
+                    )
+                    return "load_failed"
+                await self._log("已离开职位列表，正在恢复搜索页继续投递", "warn")
+                state = await self._open_list(page, url)
+                if state != "done":
+                    return state
+                list_location = urlparse(page.url)[:3]
+                # 恢复回到首屏，重复加载已经看过的页不能耗尽下滑预算。
+                scrolls = 0
+                idle = 0
+                continue
+            recoveries = 0
+            idle = 0 if len(done) > seen else idle + 1
+            if idle >= 2:
+                break
+            await self._load_more(page)
+            await self._pause(self._pace.scroll)
+            scrolls += 1
+        return self._end_state()
+
+    async def _open_list(self, page: Page, url: str) -> str:
+        """首次加载或沟通跳转后恢复列表；停止、登录和加载失败沿用搜索状态。"""
         if self._stop.is_set():
             return self._end_state()
         self._listed.clear()
@@ -276,21 +323,7 @@ class JobScraper:
         if await self._needs_login(page):
             return "need_login"
 
-        done: set[str] = set()
-        idle = 0
-        for _ in range(self.MAX_SCROLLS):
-            seen = len(done)
-            jobs.extend(await self._scrape_cards(page, done, on_job))
-            if self._stop.is_set():
-                return self._end_state()
-            if await self._needs_login(page):
-                return "need_login"
-            idle = 0 if len(done) > seen else idle + 1
-            if self._stop.is_set() or idle >= 2:
-                break
-            await self._load_more(page)
-            await self._pause(self._pace.scroll)
-        return self._end_state()
+        return "done"
 
     async def _needs_login(self, page: Page) -> bool:
         """登录弹层、整页登录或安全验证均需用户处理，不继续切换城市。"""
@@ -313,7 +346,9 @@ class JobScraper:
         operation = asyncio.ensure_future(action)
         stopped = asyncio.create_task(self._stop.wait())
         try:
-            await asyncio.wait((operation, stopped), return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait(
+                (operation, stopped), return_when=asyncio.FIRST_COMPLETED
+            )
             if self._stop.is_set():
                 return False
             await operation
@@ -336,12 +371,19 @@ class JobScraper:
         不点开；其余点开取详情、AI 复核，合适的投递。判断结果和原因都入库。
         """
         cards = page.locator(self.CARD)
+        list_location = urlparse(page.url)[:3]
         batch: list[Job] = []
         for i in range(await cards.count()):
-            if self._stop.is_set():
+            if self._stop.is_set() or urlparse(page.url)[:3] != list_location:
+                break
+            if i >= await cards.count():
                 break
             card = cards.nth(i)
-            job = await self._listed_job_for(card, i)
+            try:
+                job = await self._listed_job_for(card, i)
+            except PlaywrightTimeoutError:
+                await self._log("职位卡片已变化，重新获取列表", "warn")
+                break
             if job is None or job.job_id in done:
                 continue
             done.add(job.job_id)
@@ -356,6 +398,9 @@ class JobScraper:
                 continue
 
             job = await self._open_detail(page, card, job)
+            if urlparse(page.url)[:3] != list_location:
+                done.discard(job.job_id)
+                break
             reason, score = "符合筛选条件", None
             if self._reviewer:
                 try:
@@ -409,14 +454,59 @@ class JobScraper:
             if text != "立即沟通":
                 return self.CHATTED if "继续" in text else f"沟通按钮为「{text}」"
             await button.click(timeout=5_000)
-            await stay.or_(limit).first.wait_for(timeout=8_000)
+            if not await self._wait_page_action(
+                self._wait_apply_result(page, stay, limit)
+            ):
+                return "已停止投递，沟通结果未确认"
             if await limit.first.is_visible():
                 self._hit_limit()
                 return "今日投递次数已达上限，停止投递"
+            if self._is_chat_url(page.url):
+                return ""
             await stay.first.click(timeout=5_000)
         except PlaywrightError as exc:
             return f"投递失败：{str(exc).splitlines()[0]}"
         return ""
+
+    @staticmethod
+    def _is_chat_url(url: str) -> bool:
+        return urlparse(url).path.rstrip("/") == "/web/geek/chat"
+
+    async def _wait_apply_result(
+        self, page: Page, stay: Locator, limit: Locator
+    ) -> None:
+        """BOSS 可弹出确认框，也可直接跳转聊天页；任一种出现即结束等待。"""
+        if self._is_chat_url(page.url):
+            return
+        tasks = {
+            asyncio.create_task(stay.or_(limit).first.wait_for(timeout=8_000)),
+            asyncio.create_task(
+                page.wait_for_url(
+                    self._is_chat_url, wait_until="domcontentloaded", timeout=8_000
+                )
+            ),
+        }
+        pending = tasks.copy()
+        error: PlaywrightError | None = None
+        try:
+            while pending:
+                finished, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in finished:
+                    try:
+                        await task
+                    except PlaywrightError as exc:
+                        error = exc
+                    else:
+                        return
+            if error is not None:
+                raise error
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _hit_limit(self) -> None:
         """达到每日投递上限：停止投递。"""
@@ -449,7 +539,7 @@ class JobScraper:
 
     async def _listed_job_for(self, card: Locator, index: int) -> Job | None:
         """找卡片对应的列表职位：先按 data-jobid，找不到就按顺序对应。"""
-        job_id = await card.get_attribute("data-jobid")
+        job_id = await card.get_attribute("data-jobid", timeout=2_000)
         if job_id and job_id in self._listed:
             return self._listed[job_id]
         jobs = list(self._listed.values())
