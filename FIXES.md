@@ -1,6 +1,6 @@
 # 沟通后跳转聊天页导致投递超时
 
-本 fork 基于上游 v0.6.8，修复已包含在 `main` 分支。
+本 fork 基于上游 v0.6.8，修复版版本号为 0.6.9，已包含在 `main` 分支。
 
 ## 问题
 
@@ -26,9 +26,13 @@ waiting for locator("li.job-card-box, .job-card-wrapper").nth(...)
 
 Chrome 浏览器测试使用本机拦截的模拟页面，覆盖直接跳转、正常确认弹窗及每日上限，不发送真实消息。同一直接跳转测试在上游 v0.6.8 可复现原来的 30 秒卡片读取超时，修复后通过。另有单元测试覆盖列表重排、第二页恢复、卡片消失及停止操作。
 
-## 使用修复版源码
+## 安装 Windows 修复版
 
-本次提供源码修复，未生成新的安装包。已安装的上游程序需要另行更新，才能使用此修复。
+Windows x64 的 `.exe` 和 `.msi` 安装包已通过 [GitHub Actions 构建与检查](https://github.com/cg689/ghost-job/actions/runs/38192299052)。在构建页面的 Artifacts 中下载 `ghost-job-windows-x86_64`，解压后任选一种安装包安装。构建产物保留 14 天，也可以在本仓库的 Release CI 工作流中选择 `windows` 重新打包。
+
+安装前关闭正在运行的 Ghost Job。安装后界面版本应显示为 0.6.9，运行需要本机已安装 Google Chrome。
+
+## 使用修复版源码
 
 安装 Git 和 uv 后，在 PowerShell 运行：
 
